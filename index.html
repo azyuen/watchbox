@@ -59,6 +59,7 @@ input,textarea,select{-webkit-user-select:text;user-select:text}
 #collection-filter-bar::-webkit-scrollbar{display:none}
 .coll-filter-btn{flex-shrink:0;padding:6px 14px;border-radius:20px;font-size:11px;font-weight:500;letter-spacing:.08em;border:1px solid var(--frame-border);background:rgba(0,0,0,.18);color:var(--text-muted);cursor:pointer;font-family:'Inter',sans-serif;transition:all .2s;-webkit-tap-highlight-color:transparent;white-space:nowrap}
 .coll-filter-btn.active{background:var(--accent);border-color:var(--accent);color:var(--bg-base);font-weight:600}
+.coll-filter-btn.coll-dragging{opacity:.55;border-style:dashed;transform:scale(1.04);box-shadow:0 2px 10px rgba(0,0,0,.3)}
 .box-grid{padding:14px 12px 100px;display:grid;gap:10px}
 .box-grid.layout-2{grid-template-columns:repeat(2,1fr)}
 .box-grid.layout-3{grid-template-columns:repeat(3,1fr)}
@@ -884,6 +885,7 @@ function dbClear(store){return new Promise((r,j)=>{const q=tx(store,'readwrite')
 // -- State --
 let watches=[],log=[],theme={};
 let activeCollection='all'; // 'all' or a collection name string
+let collectionOrder=[]; // user-defined collection order, stored in IndexedDB prefs
 let prefs={layout:'2',photoFit:'contain'};
 let editingId=null,editImageData=null;
 
@@ -938,6 +940,7 @@ async function loadAll(){
   const hf=await dbGet('prefs','heroFont'); if(hf) heroFontKey=hf.value;
   const jl=await dbGet('prefs','journalLock'); if(jl){ journalLockEnabled=jl.value; journalLocked=jl.value; }
   const lv=await dbGet('prefs','lastJournalView'); if(lv) lastJournalView=lv.value;
+  const co=await dbGet('prefs','collectionOrder'); if(co&&Array.isArray(co.value)) collectionOrder=co.value;
   await loadWatchlist();
 }
 
@@ -1002,26 +1005,98 @@ function setPhotoFit(fit){
 }
 
 // -- Render box --
-function renderFilterBar(){
-  const cols=[...new Set(watches.map(w=>w.collection).filter(Boolean))].sort();
-  const bar=document.getElementById('collection-filter-bar');
+function orderedCollections(){
+  const names=[...new Set(watches.map(w=>w.collection).filter(Boolean))];
+  return names.sort((a,b)=>{
+    const ai=collectionOrder.indexOf(a),bi=collectionOrder.indexOf(b);
+    if(ai<0&&bi<0)return a.localeCompare(b);
+    if(ai<0)return 1;
+    if(bi<0)return -1;
+    return ai-bi;
+  });
+}
 
-  if(cols.length===0){
+function renderFilterBar(){
+  const cols=orderedCollections();
+  const bar=document.getElementById('collection-filter-bar');
+  if(!cols.length){
     bar.style.display='none';
     activeCollection='all';
     return;
   }
-
   bar.style.display='flex';
   bar.innerHTML='';
-
-  [['all','All'], ...cols.map(c=>[c,c])].forEach(([key,label])=>{
+  [['all','All'],...cols.map(c=>[c,c])].forEach(([key,label])=>{
     const btn=document.createElement('button');
     btn.className='coll-filter-btn'+(activeCollection===key?' active':'');
     btn.textContent=label;
+    btn.dataset.collection=key;
     btn.addEventListener('click',()=>setCollectionFilter(key));
     bar.appendChild(btn);
   });
+  initCollectionDrag(bar);
+}
+
+// Hold a collection chip and drag it to a new position. "All" stays fixed.
+function initCollectionDrag(bar){
+  if(bar._collectionDragReady)return;
+  bar._collectionDragReady=true;
+  let pressed=null,dragged=null,timer=null,startX=0,startY=0,suppressClick=false;
+  const clear=()=>{clearTimeout(timer);timer=null;};
+  function begin(btn){
+    dragged=btn;
+    btn.classList.add('coll-dragging');
+    if(navigator.vibrate)navigator.vibrate(20);
+  }
+  function move(x,y){
+    if(!dragged)return;
+    const target=document.elementFromPoint(x,y)?.closest('.coll-filter-btn');
+    if(!target||target===dragged||target.dataset.collection==='all'||target.parentNode!==bar)return;
+    const rect=target.getBoundingClientRect();
+    bar.insertBefore(dragged,x<rect.left+rect.width/2?target:target.nextSibling);
+  }
+  function finish(){
+    clear();
+    if(dragged){
+      dragged.classList.remove('coll-dragging');
+      const next=[...bar.querySelectorAll('.coll-filter-btn')].map(b=>b.dataset.collection).filter(c=>c!=='all');
+      collectionOrder=next;
+      savePref('collectionOrder',collectionOrder);
+      suppressClick=true;
+      renderBox();
+    }
+    dragged=null;pressed=null;
+  }
+  bar.addEventListener('click',e=>{
+    if(suppressClick){e.stopImmediatePropagation();e.preventDefault();suppressClick=false;}
+  },true);
+  bar.addEventListener('touchstart',e=>{
+    const btn=e.target.closest('.coll-filter-btn');
+    if(!btn||btn.dataset.collection==='all')return;
+    pressed=btn;startX=e.touches[0].clientX;startY=e.touches[0].clientY;
+    clear();timer=setTimeout(()=>begin(btn),350);
+  },{passive:true});
+  bar.addEventListener('touchmove',e=>{
+    if(!pressed)return;
+    const t=e.touches[0];
+    if(!dragged&&Math.hypot(t.clientX-startX,t.clientY-startY)>9){clear();pressed=null;return;}
+    if(dragged){e.preventDefault();move(t.clientX,t.clientY);}
+  },{passive:false});
+  bar.addEventListener('touchend',finish,{passive:true});
+  bar.addEventListener('touchcancel',finish,{passive:true});
+  bar.addEventListener('mousedown',e=>{
+    if(e.button!==0)return;
+    const btn=e.target.closest('.coll-filter-btn');
+    if(!btn||btn.dataset.collection==='all')return;
+    pressed=btn;startX=e.clientX;startY=e.clientY;
+    clear();timer=setTimeout(()=>begin(btn),350);
+  });
+  window.addEventListener('mousemove',e=>{
+    if(!pressed)return;
+    if(!dragged&&Math.hypot(e.clientX-startX,e.clientY-startY)>9){clear();pressed=null;return;}
+    if(dragged){e.preventDefault();move(e.clientX,e.clientY);}
+  });
+  window.addEventListener('mouseup',()=>{if(pressed||dragged)finish();});
 }
 
 function setCollectionFilter(col){
@@ -1036,7 +1111,11 @@ function renderBox(){
   grid.className='box-grid layout-'+prefs.layout;
 
   const visible = activeCollection==='all'
-    ? watches
+    ? [...watches].sort((a,b)=>{
+        const cols=orderedCollections();
+        const ai=cols.indexOf(a.collection),bi=cols.indexOf(b.collection);
+        return (ai<0?cols.length:ai)-(bi<0?cols.length:bi);
+      })
     : watches.filter(w=>(w.collection||'').toLowerCase()===(activeCollection||'').toLowerCase());
 
   visible.forEach(w=>{
@@ -1254,6 +1333,7 @@ function recordWear(watchId,card,slot){
 // -- Tab switching --
 let journalSub='overview';
 let journalPeriod='all';
+let overviewMonthLimit=12;
 
 function filterLogByPeriod(entries){
   const now=new Date();
@@ -1283,6 +1363,7 @@ function periodSelector(){
 }
 
 function setPeriod(p){ journalPeriod=p; renderJournal(); }
+function setOverviewMonthLimit(value){overviewMonthLimit=value==='all'?'all':Number(value);renderJournal();}
 
 function goBackFromLock(){
   document.getElementById('journal-lock-screen').style.display='none';
@@ -1352,13 +1433,11 @@ function renderOverview(){
     monthly[k][e.watchId]=(monthly[k][e.watchId]||0)+1;
   });
   const months=Object.keys(monthly).sort().reverse();
+  const shownMonths=overviewMonthLimit==='all'?months:months.slice(0,overviewMonthLimit);
 
   let html=`<div class="stats-top">
     <div class="stats-heading">Overview</div>
-    <div class="stats-top-btns">
-      <button class="manual-add-btn" onclick="openManualModal()">+ Add</button>
-      <button class="export-btn" onclick="exportCSV()">CSV</button>
-    </div>
+
   </div>
   ${periodSelector()}
   <div class="period-summary">${total} wear${total!==1?'s':''} &mdash; ${periodLabel()}</div>
@@ -1381,8 +1460,11 @@ function renderOverview(){
   // Monthly breakdown
   if(months.length>0){
     const periodMonthTitle = journalPeriod==='this-month' ? 'Daily breakdown' : 'Month by month';
-    html+=`<div class="section-title">${periodMonthTitle}</div>`;
-    months.forEach(month=>{
+    html+=`<div class="section-title">${periodMonthTitle}</div>
+      <div class="period-selector" aria-label="Months shown">
+        ${[[6,'6 months'],[12,'12 months'],[24,'24 months'],['all','All months']].map(([v,l])=>`<button class="period-btn${overviewMonthLimit===v?' active':''}" onclick="setOverviewMonthLimit('${v}')">${l}</button>`).join('')}
+      </div>`;
+    shownMonths.forEach(month=>{
       const entries=monthly[month];
       const mTotal=Object.values(entries).reduce((a,b)=>a+b,0);
       const label=new Date(month+'-02').toLocaleDateString('en-GB',{month:'long',year:'numeric'});
@@ -1596,7 +1678,7 @@ let logSelected=new Set(); // ids selected for bulk delete
 
 function renderLog(){
   if(!log.length){
-    return `<div class="log-toolbar"></div>
+    return `<div class="log-toolbar"><div class="stats-top-btns"><button class="manual-add-btn" onclick="openManualModal()">+ Add</button><button class="export-btn" onclick="exportCSV()">CSV</button></div></div>
       <div class="stats-empty">No wears logged yet.<br>Start by tapping a watch in your box.</div>`;
   }
 
@@ -1616,6 +1698,7 @@ function renderLog(){
   const hasSelected=logSelected.size>0;
 
   let html=`<div class="log-toolbar">
+    <div class="stats-top-btns" style="margin-bottom:12px"><button class="manual-add-btn" onclick="openManualModal()">+ Add</button><button class="export-btn" onclick="exportCSV()">CSV</button></div>
     <div class="log-sort-row">
       ${['newest','oldest','watch','brand'].map(s=>`<button class="log-sort-btn${logSort===s?' active':''}" onclick="setLogSort('${s}')">${s.charAt(0).toUpperCase()+s.slice(1)}</button>`).join('')}
     </div>
