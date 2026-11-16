@@ -2,7 +2,7 @@
 // Bump CACHE_VERSION whenever you push a new deploy to GitHub Pages.
 // The app will detect the new worker, show an "Update available" banner,
 // and reload to serve the fresh version.
-const CACHE_VERSION = 'watchbox-v1';
+const CACHE_VERSION = 'watchbox-v2';
 const ASSETS = [
   './',
   './index.html',
